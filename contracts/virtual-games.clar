@@ -261,3 +261,63 @@
     )
   )
 )
+
+;; Open dispute on transaction
+(define-public (open-dispute (transaction-id uint) (dispute-reason (string-ascii 50)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (asserts! (<= block-height (get expiration-block transaction-data)) ERROR_DEAL_EXPIRED)
+      (map-set TransactionLedger
+        { transaction-id: transaction-id }
+        (merge transaction-data { transaction-state: "disputed" })
+      )
+      (print {event: "dispute_opened", transaction-id: transaction-id, initiator: tx-sender, reason: dispute-reason})
+      (ok true)
+    )
+  )
+)
+
+;; Provide merchant feedback after transaction
+(define-public (rate-merchant (transaction-id uint) (rating uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (<= rating u5) ERROR_AMOUNT_INVALID) ;; Rating must be between 0-5
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (is-eq tx-sender purchaser) ERROR_ACCESS_DENIED)
+      (asserts! (is-eq (get transaction-state transaction-data) "completed") (err u109)) ;; Can only rate after completion
+      (print {event: "merchant_rated", transaction-id: transaction-id, merchant: merchant, rating: rating, reviewer: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Add cryptographic verification signature
+(define-public (add-verification (transaction-id uint) (digital-signature (buff 65)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (print {event: "digital_verification_added", transaction-id: transaction-id, party: tx-sender, digital-signature: digital-signature})
+      (ok true)
+    )
+  )
+)
