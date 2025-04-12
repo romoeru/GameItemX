@@ -161,3 +161,103 @@
     )
   )
 )
+
+;; Implement whitelist for trusted merchants and high-value transactions
+(define-public (register-trusted-relationship (counterparty principal) (trust-level uint) (transaction-limit uint))
+  (begin
+    ;; Validate inputs
+    (asserts! (and (>= trust-level u1) (<= trust-level u3)) (err u350)) ;; Trust levels: 1=basic, 2=verified, 3=premium
+    (asserts! (> transaction-limit u0) ERROR_AMOUNT_INVALID)
+    (asserts! (not (is-eq counterparty tx-sender)) (err u351)) ;; Cannot whitelist yourself
+
+    ;; Higher trust levels allow higher transaction limits
+    (asserts! (or (and (is-eq trust-level u1) (<= transaction-limit u1000))
+                 (and (is-eq trust-level u2) (<= transaction-limit u10000))
+                 (and (is-eq trust-level u3) (<= transaction-limit u100000))) (err u352))
+
+    ;; In a real implementation, you would store this in a map
+    ;; This example just demonstrates the structure
+
+    (print {event: "trust_relationship_registered", user: tx-sender, counterparty: counterparty, 
+            trust-level: trust-level, transaction-limit: transaction-limit})
+    (ok trust-level)
+  )
+)
+
+;; Merchant confirms acceptance of transaction terms
+(define-public (approve-transaction (transaction-id uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (is-eq tx-sender merchant) ERROR_ACCESS_DENIED)
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+      (asserts! (<= block-height (get expiration-block transaction-data)) ERROR_DEAL_EXPIRED)
+      (map-set TransactionLedger
+        { transaction-id: transaction-id }
+        (merge transaction-data { transaction-state: "approved" })
+      )
+      (print {event: "transaction_approved", transaction-id: transaction-id, merchant: merchant})
+      (ok true)
+    )
+  )
+)
+
+;; Increase the transaction duration period
+(define-public (extend-transaction-time (transaction-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (> additional-blocks u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= additional-blocks u1440) ERROR_AMOUNT_INVALID) ;; Maximum ~10 days extension
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data)) 
+        (merchant (get merchant transaction-data))
+        (current-deadline (get expiration-block transaction-data))
+        (new-deadline (+ current-deadline additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (map-set TransactionLedger
+        { transaction-id: transaction-id }
+        (merge transaction-data { expiration-block: new-deadline })
+      )
+      (print {event: "transaction_extended", transaction-id: transaction-id, requestor: tx-sender, new-deadline: new-deadline})
+      (ok true)
+    )
+  )
+)
+
+;; Recover funds when transaction expired
+(define-public (recover-expired-funds (transaction-id uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (payment-amount (get payment-amount transaction-data))
+        (deadline (get expiration-block transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (asserts! (> block-height deadline) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? payment-amount tx-sender purchaser))
+        success
+          (begin
+            (map-set TransactionLedger
+              { transaction-id: transaction-id }
+              (merge transaction-data { transaction-state: "expired" })
+            )
+            (print {event: "expired_funds_recovered", transaction-id: transaction-id, purchaser: purchaser, payment-amount: payment-amount})
+            (ok true)
+          )
+        error ERROR_PAYMENT_ISSUE
+      )
+    )
+  )
+)
