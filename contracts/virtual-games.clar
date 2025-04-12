@@ -395,3 +395,65 @@
   )
 )
 
+;; Security function to freeze suspicious activity
+(define-public (freeze-suspicious-activity (transaction-id uint) (suspicion-details (string-ascii 100)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender CONTRACT_ADMIN) (is-eq tx-sender purchaser) (is-eq tx-sender merchant)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") 
+                   (is-eq (get transaction-state transaction-data) "approved")) 
+                ERROR_ALREADY_FINALIZED)
+      (map-set TransactionLedger
+        { transaction-id: transaction-id }
+        (merge transaction-data { transaction-state: "frozen" })
+      )
+      (print {event: "activity_frozen", transaction-id: transaction-id, reporter: tx-sender, details: suspicion-details})
+      (ok true)
+    )
+  )
+)
+
+;; Create phased payment transaction
+(define-public (create-phased-transaction (merchant principal) (item-id uint) (payment-amount uint) (phases uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (deadline (+ block-height TRANSACTION_LIFETIME_BLOCKS))
+      (phase-amount (/ payment-amount phases))
+    )
+    (asserts! (> payment-amount u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> phases u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= phases u5) ERROR_AMOUNT_INVALID) ;; Max 5 phases
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+    (asserts! (is-eq (* phase-amount phases) payment-amount) (err u121)) ;; Ensure even division
+    (match (stx-transfer? payment-amount tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "phased_transaction_created", transaction-id: transaction-id, purchaser: tx-sender, merchant: merchant, 
+                  item-id: item-id, payment-amount: payment-amount, phases: phases, phase-amount: phase-amount})
+          (ok transaction-id)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
+
+;; Emergency halt for critical contract vulnerabilities
+(define-public (emergency-halt-operations)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_ACCESS_DENIED)
+    (print {event: "operations_emergency_halted", administrator: tx-sender, halt-block: block-height})
+    ;; Note: In a real implementation, you would set a contract variable to track the paused state
+    ;; and add checks to all functions to prevent execution while paused
+    (ok true)
+  )
+)
+
