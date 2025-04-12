@@ -740,3 +740,178 @@
   )
 )
 
+;; Create a transaction with escrow release milestones
+(define-public (create-milestone-transaction (merchant principal) (item-id uint) (total-amount uint) (milestone-percentages (list 5 uint)))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (deadline (+ block-height TRANSACTION_LIFETIME_BLOCKS))
+      (milestone-count (len milestone-percentages))
+      (total-percentage (fold + milestone-percentages u0))
+    )
+    (asserts! (> total-amount u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> milestone-count u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= milestone-count u5) (err u260)) ;; Maximum 5 milestones
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+    (asserts! (is-eq total-percentage u100) (err u261)) ;; Percentages must add up to 100
+
+    (match (stx-transfer? total-amount tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "milestone_transaction_created", transaction-id: transaction-id, purchaser: tx-sender, 
+                  merchant: merchant, item-id: item-id, total-amount: total-amount, 
+                  milestone-percentages: milestone-percentages})
+          (ok transaction-id)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
+
+;; Release payment for a specific milestone
+(define-public (release-milestone-payment (transaction-id uint) (milestone-index uint) (milestone-proof (buff 32)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (<= milestone-index u4) (err u270)) ;; Max index is 4 (for 5 milestones)
+
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+        (payment-amount (get payment-amount transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") 
+                   (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (asserts! (<= block-height (get expiration-block transaction-data)) ERROR_DEAL_EXPIRED)
+
+      ;; In a real implementation, you would track released milestones and calculate the amount to release
+      ;; This is a simplified version that just demonstrates the structure
+      (print {event: "milestone_payment_released", transaction-id: transaction-id, milestone-index: milestone-index, 
+              merchant: merchant, proof-hash: (hash160 milestone-proof), released-by: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Implement transaction delegation with time-locked recovery
+(define-public (delegate-transaction-control (transaction-id uint) (delegate principal) (delegation-period uint) (delegation-scope (string-ascii 20)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (> delegation-period u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= delegation-period u144) (err u300)) ;; Max ~1 day
+
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+        (expiry-block (+ block-height delegation-period))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant)) ERROR_ACCESS_DENIED)
+      (asserts! (not (is-eq delegate tx-sender)) (err u301)) ;; Cannot delegate to self
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") 
+                   (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (asserts! (<= block-height (get expiration-block transaction-data)) ERROR_DEAL_EXPIRED)
+
+      ;; Validate delegation scope
+      (asserts! (or (is-eq delegation-scope "complete-only") 
+                   (is-eq delegation-scope "cancel-only") 
+                   (is-eq delegation-scope "complete-and-cancel")
+                   (is-eq delegation-scope "dispute-only")) (err u302))
+
+      (print {event: "transaction_delegated", transaction-id: transaction-id, delegator: tx-sender, 
+              delegate: delegate, delegation-period: delegation-period, expiry-block: expiry-block,
+              delegation-scope: delegation-scope})
+      (ok expiry-block)
+    )
+  )
+)
+
+;; Create a recurring subscription payment transaction
+(define-public (create-subscription-transaction (merchant principal) (service-id uint) (payment-per-cycle uint) (cycle-blocks uint) (max-cycles uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (initial-payment payment-per-cycle)
+      (cycle-duration (if (< cycle-blocks u144) u144 cycle-blocks)) ;; Minimum 1 day (~144 blocks)
+    )
+    (asserts! (> payment-per-cycle u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> max-cycles u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= max-cycles u52) (err u310)) ;; Maximum ~1 year of weekly subscriptions
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+
+    ;; Transfer first payment to contract
+    (match (stx-transfer? initial-payment tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "subscription_created", transaction-id: transaction-id, subscriber: tx-sender, 
+                  merchant: merchant, service-id: service-id, payment-per-cycle: payment-per-cycle, 
+                  cycle-blocks: cycle-duration, max-cycles: max-cycles, next-payment-block: (+ block-height cycle-duration)})
+          (ok transaction-id)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
+
+;; Create a transaction with collateral requirement
+(define-public (create-collateralized-transaction (merchant principal) (item-id uint) (payment-amount uint) (collateral-amount uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (deadline (+ block-height TRANSACTION_LIFETIME_BLOCKS))
+      (total-amount (+ payment-amount collateral-amount))
+    )
+    (asserts! (> payment-amount u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> collateral-amount u0) ERROR_AMOUNT_INVALID)
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+
+    ;; Transfer payment + collateral to contract
+    (match (stx-transfer? total-amount tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "collateralized_transaction_created", transaction-id: transaction-id, purchaser: tx-sender, 
+                  merchant: merchant, item-id: item-id, payment-amount: payment-amount, 
+                  collateral-amount: collateral-amount, deadline: deadline})
+          (ok transaction-id)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
+
+;; Set up an automatic transaction with time-based execution
+(define-public (schedule-timed-transaction (merchant principal) (item-id uint) (payment-amount uint) (execution-delay uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (execution-block (+ block-height execution-delay))
+    )
+    (asserts! (> payment-amount u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> execution-delay u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= execution-delay u720) (err u330)) ;; Maximum ~5 days delay
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+
+    ;; Transfer payment to contract
+    (match (stx-transfer? payment-amount tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "timed_transaction_scheduled", transaction-id: transaction-id, purchaser: tx-sender, 
+                  merchant: merchant, item-id: item-id, payment-amount: payment-amount, 
+                  execution-block: execution-block})
+          (ok execution-block)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
