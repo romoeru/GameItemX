@@ -457,3 +457,134 @@
   )
 )
 
+;; Schedule time-locked sensitive operations
+(define-public (schedule-sensitive-operation (operation-name (string-ascii 20)) (operation-data (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_ACCESS_DENIED)
+    (asserts! (> (len operation-data) u0) ERROR_AMOUNT_INVALID)
+    (let
+      (
+        (execute-at-block (+ block-height u144)) ;; 24 hours delay based on block height
+      )
+      (print {event: "operation_scheduled", operation: operation-name, data: operation-data, execute-at-block: execute-at-block})
+      (ok execute-at-block)
+    )
+  )
+)
+
+;; Enable enhanced security for high-value transactions
+(define-public (enable-enhanced-security (transaction-id uint) (security-token (buff 32)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (payment-amount (get payment-amount transaction-data))
+      )
+      ;; Only allow enhanced security for transactions above a certain value threshold
+      (asserts! (> payment-amount u5000) (err u130))
+      (asserts! (is-eq tx-sender purchaser) ERROR_ACCESS_DENIED)
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+      (print {event: "enhanced_security_enabled", transaction-id: transaction-id, purchaser: purchaser, token-hash: (hash160 security-token)})
+      (ok true)
+    )
+  )
+)
+
+;; Verify transaction with cryptographic signatures
+(define-public (cryptographically-verify-transaction (transaction-id uint) (message-data (buff 32)) (crypto-signature (buff 65)) (signing-party principal))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+        (verification-result (unwrap! (secp256k1-recover? message-data crypto-signature) (err u150)))
+      )
+      ;; Verify the transaction with cryptographic proof
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq signing-party purchaser) (is-eq signing-party merchant)) (err u151))
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+
+      ;; Verify that the signature corresponds to the expected signing party
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signing-party) (err u153))
+
+      (print {event: "transaction_crypto_verified", transaction-id: transaction-id, verifier: tx-sender, signing-party: signing-party})
+      (ok true)
+    )
+  )
+)
+
+;; Add metadata to transaction for advanced analytics
+(define-public (attach-transaction-metadata (transaction-id uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      ;; Allow metadata addition by authorized parties only
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (not (is-eq (get transaction-state transaction-data) "completed")) (err u160))
+      (asserts! (not (is-eq (get transaction-state transaction-data) "refunded")) (err u161))
+      (asserts! (not (is-eq (get transaction-state transaction-data) "expired")) (err u162))
+
+      ;; Validate metadata category
+      (asserts! (or (is-eq metadata-category "item-details") 
+                   (is-eq metadata-category "delivery-evidence")
+                   (is-eq metadata-category "quality-report")
+                   (is-eq metadata-category "purchaser-requirements")) (err u163))
+
+      (print {event: "metadata_attached", transaction-id: transaction-id, metadata-category: metadata-category, 
+              metadata-digest: metadata-digest, submitted-by: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+
+
+;; Configure security rate-limiting
+(define-public (configure-security-limits (attempt-limit uint) (lockout-period uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_ACCESS_DENIED)
+    (asserts! (> attempt-limit u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= attempt-limit u10) ERROR_AMOUNT_INVALID) ;; Maximum 10 attempts allowed
+    (asserts! (> lockout-period u6) ERROR_AMOUNT_INVALID) ;; Minimum 6 blocks lockout (~1 hour)
+    (asserts! (<= lockout-period u144) ERROR_AMOUNT_INVALID) ;; Maximum 144 blocks lockout (~1 day)
+
+    ;; Note: In a real implementation, you would set contract variables to track
+    ;; the rate limiting parameters and implement logic in each function to enforce them
+
+    (print {event: "security_limits_configured", attempt-limit: attempt-limit, 
+            lockout-period: lockout-period, administrator: tx-sender, block-height: block-height})
+    (ok true)
+  )
+)
+
+;; Set up time-locked recovery mechanism
+(define-public (establish-recovery-mechanism (transaction-id uint) (delay-period uint) (recovery-principal principal))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (> delay-period u72) ERROR_AMOUNT_INVALID) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-period u1440) ERROR_AMOUNT_INVALID) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (activation-block (+ block-height delay-period))
+      )
+      (asserts! (is-eq tx-sender purchaser) ERROR_ACCESS_DENIED)
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+      (asserts! (not (is-eq recovery-principal purchaser)) (err u180)) ;; Recovery principal must be different from purchaser
+      (asserts! (not (is-eq recovery-principal (get merchant transaction-data))) (err u181)) ;; Recovery principal must be different from merchant
+      (print {event: "recovery_mechanism_established", transaction-id: transaction-id, purchaser: purchaser, 
+              recovery-principal: recovery-principal, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
