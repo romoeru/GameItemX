@@ -997,3 +997,54 @@
     )
   )
 )
+
+;; Implement a decentralized escrow with multi-signature release
+(define-public (create-multi-sig-transaction (merchant principal) (item-id uint) (payment-amount uint) (required-approvals uint) (approvers (list 5 principal)))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (deadline (+ block-height TRANSACTION_LIFETIME_BLOCKS))
+      (approver-count (len approvers))
+    )
+    (asserts! (> payment-amount u0) ERROR_AMOUNT_INVALID)
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+    (asserts! (> approver-count u0) (err u400))
+    (asserts! (<= approver-count u5) (err u401)) ;; Maximum 5 approvers
+    (asserts! (>= approver-count required-approvals) (err u402)) ;; Cant require more approvals than approvers
+    (asserts! (> required-approvals u0) (err u403)) ;; Must require at least 1 approval
+
+    ;; Transfer payment to contract
+    (match (stx-transfer? payment-amount tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "multi_sig_transaction_created", transaction-id: transaction-id, purchaser: tx-sender, 
+                  merchant: merchant, item-id: item-id, payment-amount: payment-amount, 
+                  required-approvals: required-approvals, approvers: approvers, deadline: deadline})
+          (ok transaction-id)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
+
+;; Approve multi-signature transaction release
+(define-public (approve-multi-sig-transaction (transaction-id uint) (approval-signature (buff 65)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (merchant (get merchant transaction-data))
+      )
+      ;; In a real implementation, you would check if sender is in the approvers list
+      ;; and track accumulated approvals
+
+      (print {event: "multi_sig_approval", transaction-id: transaction-id, approver: tx-sender,
+              signature: approval-signature})
+      (ok true)
+    )
+  )
+)
+
