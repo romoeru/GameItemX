@@ -588,3 +588,75 @@
     )
   )
 )
+
+
+;; Allow authorized operators to perform actions on behalf of a user
+(define-public (set-authorized-operator (transaction-id uint) (operator principal) (can-complete bool) (can-cancel bool))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+      )
+      (asserts! (is-eq tx-sender purchaser) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (asserts! (not (is-eq operator purchaser)) (err u190)) ;; Operator cannot be the purchaser
+      (asserts! (not (is-eq operator (get merchant transaction-data))) (err u191)) ;; Operator cannot be the merchant
+
+      (print {event: "operator_authorized", transaction-id: transaction-id, purchaser: purchaser, 
+              operator: operator, can-complete: can-complete, can-cancel: can-cancel})
+      (ok true)
+    )
+  )
+)
+
+;; Add two-factor authentication requirement for transaction completion
+(define-public (enable-two-factor-auth (transaction-id uint) (auth-hash (buff 32)) (auth-expiry uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (> auth-expiry block-height) ERROR_AMOUNT_INVALID)
+    (asserts! (<= auth-expiry (+ block-height u1008)) (err u200)) ;; Max expiry is transaction lifetime
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender merchant)) ERROR_ACCESS_DENIED)
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+
+      (print {event: "two_factor_auth_enabled", transaction-id: transaction-id, 
+              enabler: tx-sender, auth-hash: auth-hash, auth-expiry: auth-expiry})
+      (ok true)
+    )
+  )
+)
+
+;; Add new entries to transaction audit trail
+(define-public (add-audit-record (transaction-id uint) (action-type (string-ascii 20)) (action-data (string-ascii 100)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+      )
+      (asserts! (or (is-eq tx-sender purchaser) 
+                   (is-eq tx-sender merchant) 
+                   (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+
+      ;; Validate action type
+      (asserts! (or (is-eq action-type "message")
+                   (is-eq action-type "verification")
+                   (is-eq action-type "delivery-update")
+                   (is-eq action-type "inspection")
+                   (is-eq action-type "review")) (err u210))
+
+      (print {event: "audit_record_added", transaction-id: transaction-id, actor: tx-sender, 
+              action-type: action-type, action-data: action-data, block-height: block-height})
+      (ok true)
+    )
+  )
+)
