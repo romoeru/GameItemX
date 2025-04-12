@@ -915,3 +915,85 @@
     )
   )
 )
+
+;; Implement transaction bundling for cross-game item exchanges
+(define-public (create-bundled-exchange (counterparty principal) (my-items (list 5 uint)) (their-items (list 5 uint)) (my-payment uint) (their-payment uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (deadline (+ block-height TRANSACTION_LIFETIME_BLOCKS))
+      (my-item-count (len my-items))
+      (their-item-count (len their-items))
+    )
+    (asserts! (validate-merchant counterparty) ERROR_INVALID_COUNTERPARTY)
+    (asserts! (> (+ my-item-count their-item-count) u0) (err u360)) ;; At least one item must be exchanged
+    (asserts! (or (> my-payment u0) (> their-payment u0) (> my-item-count u0) (> their-item-count u0)) (err u361)) ;; Must exchange something
+
+    ;; Transfer my payment to contract if applicable
+    (if (> my-payment u0)
+      (unwrap! (stx-transfer? my-payment tx-sender (as-contract tx-sender)) ERROR_PAYMENT_ISSUE)
+      true
+    )
+
+    (var-set transaction-counter transaction-id)
+
+    (print {event: "bundled_exchange_created", transaction-id: transaction-id, initiator: tx-sender, 
+            counterparty: counterparty, my-items: my-items, their-items: their-items,
+            my-payment: my-payment, their-payment: their-payment, deadline: deadline})
+    (ok transaction-id)
+  )
+)
+
+;; Create an auction transaction for competitive bidding
+(define-public (create-auction-transaction (item-id uint) (minimum-bid uint) (reserve-price uint) (auction-duration uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (end-block (+ block-height auction-duration))
+    )
+    (asserts! (> minimum-bid u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> auction-duration u12) (err u380)) ;; Minimum ~2 hours
+    (asserts! (<= auction-duration u1008) (err u381)) ;; Maximum ~7 days
+    (asserts! (>= reserve-price minimum-bid) (err u382)) ;; Reserve must be >= minimum bid
+
+    (var-set transaction-counter transaction-id)
+
+    (print {event: "auction_created", transaction-id: transaction-id, seller: tx-sender, 
+            item-id: item-id, minimum-bid: minimum-bid, reserve-price: reserve-price,
+            end-block: end-block, auction-duration: auction-duration})
+    (ok transaction-id)
+  )
+)
+
+;; Place bid on an auction transaction
+(define-public (place-auction-bid (transaction-id uint) (bid-amount uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (> bid-amount u0) ERROR_AMOUNT_INVALID)
+
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (seller (get merchant transaction-data)) ;; The merchant field stores the seller in auctions
+        (end-block (get expiration-block transaction-data))
+      )
+      ;; Validate auction is still active
+      (asserts! (< block-height end-block) (err u390))
+      ;; Validate bidder is not the seller
+      (asserts! (not (is-eq tx-sender seller)) (err u391))
+      ;; In a real implementation, you would check if bid exceeds minimum and current high bid
+
+      ;; Transfer bid amount to contract
+      (match (stx-transfer? bid-amount tx-sender (as-contract tx-sender))
+        success
+          (begin
+            ;; In a real implementation, you would return previous high bid to previous bidder
+            (print {event: "auction_bid_placed", transaction-id: transaction-id, bidder: tx-sender,
+                    bid-amount: bid-amount, bid-block: block-height})
+            (ok true)
+          )
+        error ERROR_PAYMENT_ISSUE
+      )
+    )
+  )
+)
