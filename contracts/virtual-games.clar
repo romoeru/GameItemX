@@ -660,3 +660,83 @@
     )
   )
 )
+
+;; Implement circuit breaker for transactions to protect against market manipulation
+(define-public (trigger-circuit-breaker (suspicious-transaction-id uint) (reason-code uint))
+  (begin
+    (asserts! (validate-transaction-id suspicious-transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_ACCESS_DENIED)
+    (asserts! (and (>= reason-code u1) (<= reason-code u5)) (err u220)) ;; Valid reason codes are 1-5
+
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: suspicious-transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+        (payment-amount (get payment-amount transaction-data))
+      )
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") 
+                   (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+      (print {event: "circuit_breaker_triggered", transaction-id: suspicious-transaction-id, 
+              administrator: tx-sender, reason-code: reason-code, 
+              purchaser: purchaser, merchant: merchant, amount: payment-amount})
+      (ok true)
+    )
+  )
+)
+
+;; Flag potentially fraudulent activity based on transaction patterns
+(define-public (flag-suspicious-activity (transaction-id uint) (suspicion-level uint) (evidence-hash (buff 32)))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (and (>= suspicion-level u1) (<= suspicion-level u3)) (err u240)) ;; Valid levels: 1=low, 2=medium, 3=high
+
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+        (item-id (get item-id transaction-data))
+      )
+      ;; Allow reporting from any party or admin
+      (asserts! (or (is-eq tx-sender purchaser) 
+                   (is-eq tx-sender merchant) 
+                   (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (or (is-eq (get transaction-state transaction-data) "pending") 
+                   (is-eq (get transaction-state transaction-data) "approved")) ERROR_ALREADY_FINALIZED)
+
+      (print {event: "fraud_detection_alert", transaction-id: transaction-id, reporter: tx-sender, 
+              suspicion-level: suspicion-level, evidence-hash: evidence-hash, item-id: item-id,
+              purchaser: purchaser, merchant: merchant})
+      (ok suspicion-level)
+    )
+  )
+)
+
+;; Create a batch transaction for multiple items
+(define-public (create-batch-transaction (merchant principal) (item-ids (list 10 uint)) (total-payment uint))
+  (let 
+    (
+      (transaction-id (+ (var-get transaction-counter) u1))
+      (deadline (+ block-height TRANSACTION_LIFETIME_BLOCKS))
+      (item-count (len item-ids))
+    )
+    (asserts! (> total-payment u0) ERROR_AMOUNT_INVALID)
+    (asserts! (> item-count u0) ERROR_AMOUNT_INVALID)
+    (asserts! (<= item-count u10) (err u250)) ;; Maximum 10 items per batch
+    (asserts! (validate-merchant merchant) ERROR_INVALID_COUNTERPARTY)
+
+    (match (stx-transfer? total-payment tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set transaction-counter transaction-id)
+
+          (print {event: "batch_transaction_created", transaction-id: transaction-id, purchaser: tx-sender, 
+                  merchant: merchant, item-ids: item-ids, total-payment: total-payment, item-count: item-count})
+          (ok transaction-id)
+        )
+      error ERROR_PAYMENT_ISSUE
+    )
+  )
+)
+
