@@ -321,3 +321,77 @@
     )
   )
 )
+
+;; Register backup recovery address
+(define-public (register-backup-address (transaction-id uint) (backup-address principal))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+      )
+      (asserts! (is-eq tx-sender purchaser) ERROR_ACCESS_DENIED)
+      (asserts! (not (is-eq backup-address tx-sender)) (err u111)) ;; Backup address must be different
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+      (print {event: "backup_address_registered", transaction-id: transaction-id, purchaser: purchaser, backup: backup-address})
+      (ok true)
+    )
+  )
+)
+
+;; Resolve dispute with partial payments
+(define-public (resolve-dispute (transaction-id uint) (purchaser-percent uint))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_ACCESS_DENIED)
+    (asserts! (<= purchaser-percent u100) ERROR_AMOUNT_INVALID) ;; Percentage must be 0-100
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (merchant (get merchant transaction-data))
+        (payment-amount (get payment-amount transaction-data))
+        (purchaser-amount (/ (* payment-amount purchaser-percent) u100))
+        (merchant-amount (- payment-amount purchaser-amount))
+      )
+      (asserts! (is-eq (get transaction-state transaction-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get expiration-block transaction-data)) ERROR_DEAL_EXPIRED)
+
+      ;; Send purchaser's portion
+      (unwrap! (as-contract (stx-transfer? purchaser-amount tx-sender purchaser)) ERROR_PAYMENT_ISSUE)
+
+      ;; Send merchant's portion
+      (unwrap! (as-contract (stx-transfer? merchant-amount tx-sender merchant)) ERROR_PAYMENT_ISSUE)
+
+      (map-set TransactionLedger
+        { transaction-id: transaction-id }
+        (merge transaction-data { transaction-state: "resolved" })
+      )
+      (print {event: "dispute_resolved", transaction-id: transaction-id, purchaser: purchaser, merchant: merchant, 
+              purchaser-amount: purchaser-amount, merchant-amount: merchant-amount, purchaser-percent: purchaser-percent})
+      (ok true)
+    )
+  )
+)
+
+;; Set up multiple approvers for high-value transactions
+(define-public (register-multiple-approvers (transaction-id uint) (approver principal))
+  (begin
+    (asserts! (validate-transaction-id transaction-id) ERROR_INVALID_TRANSACTION_ID)
+    (let
+      (
+        (transaction-data (unwrap! (map-get? TransactionLedger { transaction-id: transaction-id }) ERROR_TRANSACTION_NOT_FOUND))
+        (purchaser (get purchaser transaction-data))
+        (payment-amount (get payment-amount transaction-data))
+      )
+      ;; Only allow multiple approvers for high-value transactions (> 1000 STX)
+      (asserts! (> payment-amount u1000) (err u120))
+      (asserts! (or (is-eq tx-sender purchaser) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_ACCESS_DENIED)
+      (asserts! (is-eq (get transaction-state transaction-data) "pending") ERROR_ALREADY_FINALIZED)
+      (print {event: "approver_registered", transaction-id: transaction-id, approver: approver, registrar: tx-sender})
+      (ok true)
+    )
+  )
+)
+
